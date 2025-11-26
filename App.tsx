@@ -1,0 +1,498 @@
+
+import React, { useState, useEffect } from 'react';
+import { 
+  LayoutDashboard, Search, Settings, ExternalLink, 
+  BarChart3, RefreshCw, Zap, AlertTriangle, CheckCircle, Sparkles,
+  Plus, Trash2, ShieldAlert, ShieldCheck, HelpCircle, Eye,
+  ImageIcon, Play
+} from 'lucide-react';
+import { useRankTracker } from './hooks/useRankTracker';
+import { ShareOfVoiceChart, OpportunityMatrix } from './components/DashboardCharts';
+import { ContentFixerModal } from './components/ContentFixerModal';
+import { ResultPreviewModal } from './components/ResultPreviewModal';
+import { Keyword, Snapshot } from './types';
+
+// Mock initial Keywords (User would normally add these)
+const INITIAL_KEYWORDS: Keyword[] = [
+  { id: '1', project_id: 'p1', term: 'best seo agency' },
+  { id: '2', project_id: 'p1', term: 'ai ranking tools' },
+  { id: '3', project_id: 'p1', term: 'how to rank in ai overview' },
+  { id: '4', project_id: 'p1', term: 'gemini vs chatgpt for seo' },
+  { id: '5', project_id: 'p1', term: 'hypefresh reviews' },
+  { id: '6', project_id: 'p1', term: 'digital marketing trends 2025' },
+  { id: '7', project_id: 'p1', term: 'is hypefresh legit' },
+  { id: '8', project_id: 'p1', term: 'rank tracking software' },
+];
+
+const DOMAIN = 'hypefresh.com'; // Mock project domain
+
+// Robust ID generator
+const generateId = () => Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'keywords'>('dashboard');
+  const [selectedSnapshot, setSelectedSnapshot] = useState<Snapshot | null>(null);
+  
+  // Modals
+  const [isFixerOpen, setIsFixerOpen] = useState(false);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  
+  // State for Keywords with LocalStorage persistence
+  const [keywords, setKeywords] = useState<Keyword[]>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('tracked_keywords');
+      if (saved) {
+        return JSON.parse(saved);
+      }
+      // Initialize storage with defaults if empty so user has starting data
+      localStorage.setItem('tracked_keywords', JSON.stringify(INITIAL_KEYWORDS));
+    }
+    return INITIAL_KEYWORDS;
+  });
+  const [newKeywordTerm, setNewKeywordTerm] = useState('');
+
+  // Custom Hook handling the Client-Side Queue
+  const { isScanning, progress, results, startScan, completed, total } = useRankTracker(DOMAIN);
+
+  // Trigger scan on mount for demo if results are empty
+  useEffect(() => {
+    if (results.length === 0 && !isScanning && keywords.length > 0) {
+      // In a real app, we check if scan is needed based on timestamps
+    }
+  }, []);
+
+  const handleScan = () => {
+    startScan(keywords);
+  };
+
+  const handleSingleScan = (keywordId: string) => {
+    const keywordToScan = keywords.find(k => k.id === keywordId);
+    if (keywordToScan) {
+      // Pass keepHistory: true so we don't wipe out other results
+      startScan([keywordToScan], { keepHistory: true });
+    }
+  };
+
+  const handleOpenFixer = (snapshot: Snapshot) => {
+    setSelectedSnapshot(snapshot);
+    setIsFixerOpen(true);
+  };
+
+  const handleOpenPreview = (snapshot: Snapshot) => {
+    setSelectedSnapshot(snapshot);
+    setIsPreviewOpen(true);
+  };
+
+  const handleAddKeyword = () => {
+    if (!newKeywordTerm.trim()) return;
+    const term = newKeywordTerm.trim();
+    
+    // Prevent duplicates
+    if (keywords.some(k => k.term.toLowerCase() === term.toLowerCase())) {
+      alert('Keyword already exists');
+      return;
+    }
+
+    const newKw: Keyword = {
+      id: generateId(),
+      project_id: 'p1',
+      term: term
+    };
+
+    const updated = [newKw, ...keywords];
+    setKeywords(updated);
+    localStorage.setItem('tracked_keywords', JSON.stringify(updated));
+    setNewKeywordTerm('');
+  };
+
+  const handleDeleteKeyword = (id: string) => {
+    if (confirm('Are you sure you want to delete this keyword?')) {
+      const updated = keywords.filter(k => k.id !== id);
+      setKeywords(updated);
+      localStorage.setItem('tracked_keywords', JSON.stringify(updated));
+    }
+  };
+
+  // Merge keywords with results to show all keywords even if not scanned yet
+  const displayedData = keywords.map(k => {
+    const res = results.find(r => r.keyword_id === k.id);
+    if (res) return res;
+    
+    // Placeholder for unscanned keyword
+    return {
+      id: `temp-${k.id}`,
+      keyword_id: k.id,
+      keyword_term: k.term,
+      organic_rank: null,
+      gemini_rank: null,
+      ai_overview_present: false,
+      ai_position: null,
+      is_cited: false,
+      sentiment: 'Not Mentioned',
+      raw_ai_text: '',
+      created_at: new Date().toISOString(),
+      status: 'pending',
+      ai_mode: 'Not Found',
+      screenshot_url: ''
+    } as Snapshot;
+  });
+
+  // Filter data for charts to avoid skewing with pending items
+  const scannedData = displayedData.filter(d => d.status === 'scanned');
+
+  const aiShare = scannedData.length > 0 
+    ? Math.round((scannedData.filter(d => d.ai_overview_present).length / scannedData.length) * 100)
+    : 0;
+
+  // Helper to determine status and icon
+  const getStatus = (snapshot: Snapshot) => {
+    if (snapshot.status === 'pending') return { label: 'Pending', color: 'bg-slate-100 text-slate-500', icon: HelpCircle };
+    if (snapshot.sentiment === 'Negative') return { label: 'Critical', color: 'bg-red-50 text-red-700 border border-red-200', icon: ShieldAlert };
+    if (snapshot.is_cited) return { label: 'Safe', color: 'bg-green-50 text-green-700 border border-green-200', icon: ShieldCheck };
+    if (snapshot.organic_rank && snapshot.organic_rank <= 10 && !snapshot.is_cited) return { label: 'Risk', color: 'bg-orange-50 text-orange-700 border border-orange-200', icon: AlertTriangle };
+    return { label: 'Opportunity', color: 'bg-blue-50 text-blue-700 border border-blue-200', icon: Sparkles };
+  };
+
+  return (
+    <div className="flex min-h-screen bg-slate-50 text-slate-900 font-sans">
+      {/* Sidebar */}
+      <aside className="w-64 bg-white border-r border-slate-200 hidden md:flex flex-col">
+        <div className="p-6 border-b border-slate-100">
+          <div className="flex items-center gap-2 text-indigo-600">
+            <Zap className="w-6 h-6 fill-current" />
+            <h1 className="font-bold text-xl tracking-tight">AI Rank Genie</h1>
+          </div>
+          <span className="text-xs font-medium text-slate-400 mt-1 block px-1">Pro Edition</span>
+        </div>
+        
+        <nav className="flex-1 p-4 space-y-1">
+          <button 
+            onClick={() => setActiveTab('dashboard')}
+            className={`flex items-center gap-3 w-full px-4 py-3 rounded-lg text-sm font-medium transition ${activeTab === 'dashboard' ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-50'}`}
+          >
+            <LayoutDashboard className="w-5 h-5" />
+            Dashboard
+          </button>
+          <button 
+            onClick={() => setActiveTab('keywords')}
+            className={`flex items-center gap-3 w-full px-4 py-3 rounded-lg text-sm font-medium transition ${activeTab === 'keywords' ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-50'}`}
+          >
+            <Search className="w-5 h-5" />
+            Keywords
+          </button>
+          <button className="flex items-center gap-3 w-full px-4 py-3 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">
+            <BarChart3 className="w-5 h-5" />
+            Competitors
+          </button>
+        </nav>
+
+        <div className="p-4 border-t border-slate-100">
+          <button className="flex items-center gap-3 w-full px-4 py-3 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50">
+            <Settings className="w-5 h-5" />
+            Settings
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="flex-1 overflow-y-auto">
+        <header className="bg-white border-b border-slate-200 px-8 py-5 flex justify-between items-center sticky top-0 z-30">
+          <div>
+            <h2 className="text-xl font-bold text-slate-800">
+              {activeTab === 'dashboard' ? 'Overview' : 'Keyword Analysis'}
+            </h2>
+            <p className="text-sm text-slate-500">Tracking <span className="font-medium text-slate-700">{DOMAIN}</span> in United States</p>
+          </div>
+          
+          <div className="flex items-center gap-4">
+             {/* Progress Bar for Scan */}
+            {isScanning && (
+              <div className="flex flex-col items-end mr-4">
+                 <span className="text-xs font-semibold text-indigo-600 mb-1 animate-pulse">
+                   Scanning {completed}/{total}
+                 </span>
+                 <div className="w-32 h-2 bg-slate-100 rounded-full overflow-hidden shadow-inner relative">
+                   <div 
+                     className="h-full bg-indigo-600 transition-all duration-300 ease-out relative overflow-hidden"
+                     style={{ width: `${progress}%` }}
+                   >
+                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/40 to-transparent w-full h-full animate-shimmer"></div>
+                   </div>
+                 </div>
+              </div>
+            )}
+
+            <button 
+              onClick={handleScan}
+              disabled={isScanning}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold text-white shadow-sm transition ${isScanning ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+            >
+              <RefreshCw className={`w-4 h-4 ${isScanning ? 'animate-spin' : ''}`} />
+              {isScanning ? 'Updating...' : 'Update Rankings'}
+            </button>
+          </div>
+        </header>
+
+        <div className="p-8 max-w-7xl mx-auto space-y-8">
+          
+          {/* Metrics Overview */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+            <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+              <h3 className="text-sm font-medium text-slate-500 mb-2">AI Share of Voice</h3>
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-slate-900">{aiShare}%</span>
+                <span className="text-xs font-medium text-green-600 bg-green-50 px-2 py-0.5 rounded-full">+12%</span>
+              </div>
+            </div>
+            <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+              <h3 className="text-sm font-medium text-slate-500 mb-2">Total AI Citations</h3>
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-slate-900">
+                  {scannedData.filter(d => d.is_cited).length}
+                </span>
+                <span className="text-sm text-slate-400">/ {scannedData.length}</span>
+              </div>
+            </div>
+            <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+              <h3 className="text-sm font-medium text-slate-500 mb-2">Gemini Visibility</h3>
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-indigo-600">
+                   {scannedData.filter(d => d.gemini_rank !== null).length}
+                </span>
+                <span className="text-sm text-slate-400">ranked terms</span>
+              </div>
+            </div>
+            <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+              <h3 className="text-sm font-medium text-slate-500 mb-2">Avg. Organic Rank</h3>
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-bold text-slate-900">
+                  {scannedData.length > 0 
+                    ? (scannedData.reduce((acc, curr) => acc + (curr.organic_rank || 0), 0) / scannedData.filter(d => d.organic_rank).length || 0).toFixed(1)
+                    : 'N/A'}
+                </span>
+                <span className="text-xs font-medium text-slate-400">Stable</span>
+              </div>
+            </div>
+          </div>
+
+          {activeTab === 'dashboard' && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              {/* Share of Voice */}
+              <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="font-semibold text-slate-800">AI Visibility Distribution</h3>
+                </div>
+                <ShareOfVoiceChart data={scannedData} />
+              </div>
+
+              {/* Opportunity Matrix */}
+              <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                 <div className="flex justify-between items-center mb-6">
+                  <h3 className="font-semibold text-slate-800">Opportunity Matrix</h3>
+                  <div className="text-xs text-slate-400">Low AI / High Organic</div>
+                </div>
+                <OpportunityMatrix data={scannedData} />
+              </div>
+            </div>
+          )}
+
+          {/* Keyword Table */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex flex-col md:flex-row justify-between items-center gap-4">
+              <div className="flex items-center gap-2">
+                <h3 className="font-semibold text-slate-800">Keyword Performance</h3>
+                <span className="px-2 py-0.5 rounded-full bg-slate-100 text-xs font-medium text-slate-600">
+                  {displayedData.length}
+                </span>
+              </div>
+
+              {/* Add Keyword Input */}
+              <div className="flex w-full md:w-auto items-center gap-2">
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={newKeywordTerm}
+                    onChange={(e) => setNewKeywordTerm(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddKeyword()}
+                    placeholder="Add new keyword..."
+                    className="pl-3 pr-10 py-2 w-full md:w-64 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all shadow-sm"
+                  />
+                  <button 
+                    onClick={handleAddKeyword}
+                    disabled={!newKeywordTerm.trim()}
+                    className="absolute right-1 top-1 p-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Add Keyword"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+            
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50 text-slate-500 font-medium border-b border-slate-200">
+                  <tr>
+                    <th className="px-6 py-3">Keyword</th>
+                    <th className="px-6 py-3">Organic</th>
+                    <th className="px-6 py-3">AI SGE</th>
+                    <th className="px-6 py-3">Gemini Rank</th>
+                    <th className="px-6 py-3">AI Mode</th>
+                    <th className="px-6 py-3">Status</th>
+                    <th className="px-6 py-3 text-center">Snapshot</th>
+                    <th className="px-6 py-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {displayedData.length > 0 ? (
+                    displayedData.map((row) => {
+                       const statusInfo = getStatus(row);
+                       const StatusIcon = statusInfo.icon;
+                       return (
+                      <tr key={row.keyword_id} className="hover:bg-slate-50 transition-colors group">
+                        <td className="px-6 py-4 font-medium text-slate-900">{row.keyword_term}</td>
+                        {/* Organic */}
+                        <td className="px-6 py-4">
+                          {row.status === 'pending' ? (
+                            <span className="text-slate-400 italic">Pending...</span>
+                          ) : (
+                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-800">
+                              {row.organic_rank ? `#${row.organic_rank}` : 'N/A'}
+                            </span>
+                          )}
+                        </td>
+                        
+                        {/* AI SGE Column */}
+                        <td className="px-6 py-4">
+                          {row.status === 'pending' ? (
+                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-50 text-slate-400 border border-slate-200">
+                              Scan needed
+                            </span>
+                          ) : row.ai_overview_present ? (
+                            row.is_cited ? (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
+                                Cited (#{row.ai_position})
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">
+                                Not Cited
+                              </span>
+                            )
+                          ) : (
+                             <span className="text-slate-400 text-xs">Not Found</span>
+                          )}
+                        </td>
+
+                        {/* Gemini Rank Column */}
+                        <td className="px-6 py-4">
+                           {row.status === 'pending' ? (
+                             <span className="text-slate-400 italic">Pending...</span>
+                           ) : (
+                             <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-800">
+                               {row.gemini_rank ? `#${row.gemini_rank}` : 'N/A'}
+                             </span>
+                           )}
+                        </td>
+
+                        {/* AI Mode Column */}
+                        <td className="px-6 py-4">
+                           {row.status === 'pending' ? (
+                             <span className="text-slate-300">-</span>
+                           ) : (
+                             <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${
+                               row.ai_mode === 'Cited' 
+                                 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                                 : row.ai_mode === 'Not Cited'
+                                   ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                   : 'bg-slate-50 text-slate-500 border-slate-200'
+                             }`}>
+                               {row.ai_mode || 'Not Found'}
+                             </span>
+                           )}
+                        </td>
+
+                         {/* Status Column */}
+                        <td className="px-6 py-4">
+                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium ${statusInfo.color}`}>
+                             <StatusIcon className="w-3 h-3" /> {statusInfo.label}
+                          </span>
+                        </td>
+                        
+                        {/* Snapshot Column */}
+                        <td className="px-6 py-4 text-center">
+                          {row.status === 'scanned' && (
+                             <button 
+                               onClick={() => handleOpenPreview(row)}
+                               className="inline-flex items-center justify-center p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-indigo-50 hover:border-indigo-200 transition-all group/btn"
+                               title="View Screenshot"
+                             >
+                               {row.screenshot_url ? (
+                                  <div className="w-8 h-8 rounded bg-slate-100 overflow-hidden relative">
+                                    <img src={row.screenshot_url} alt="Thumb" className="w-full h-full object-cover" />
+                                    <div className="absolute inset-0 bg-black/0 group-hover/btn:bg-black/10 transition-colors" />
+                                  </div>
+                               ) : (
+                                  <ImageIcon className="w-4 h-4 text-slate-400 group-hover/btn:text-indigo-500" />
+                               )}
+                             </button>
+                          )}
+                        </td>
+
+                        <td className="px-6 py-4 text-right">
+                          <div className="flex items-center justify-end gap-3">
+                            {row.status === 'pending' ? (
+                               <button 
+                                 onClick={() => handleSingleScan(row.keyword_id)}
+                                 disabled={isScanning}
+                                 className="px-3 py-1.5 rounded-md bg-indigo-50 text-indigo-600 hover:bg-indigo-100 font-medium text-xs flex items-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                               >
+                                 Scan <Play className="w-3 h-3 fill-current" />
+                               </button>
+                            ) : (
+                              <button 
+                                onClick={() => handleOpenFixer(row)}
+                                className="text-indigo-600 hover:text-indigo-900 font-medium text-sm flex items-center gap-1"
+                              >
+                                {row.is_cited ? 'Analysis' : 'Fix'} <ExternalLink className="w-3 h-3" />
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleDeleteKeyword(row.keyword_id)}
+                              className="text-slate-400 hover:text-red-600 transition opacity-0 group-hover:opacity-100 focus:opacity-100"
+                              title="Delete Keyword"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )})
+                  ) : (
+                    <tr>
+                      <td colSpan={8} className="px-6 py-12 text-center text-slate-500">
+                        No keywords found. Add your first keyword above.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      {/* Modals */}
+      <ContentFixerModal 
+        isOpen={isFixerOpen} 
+        onClose={() => setIsFixerOpen(false)} 
+        snapshot={selectedSnapshot}
+        domain={DOMAIN}
+      />
+      <ResultPreviewModal
+        isOpen={isPreviewOpen}
+        onClose={() => setIsPreviewOpen(false)}
+        snapshot={selectedSnapshot}
+      />
+    </div>
+  );
+}
