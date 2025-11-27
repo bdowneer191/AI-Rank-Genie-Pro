@@ -10,55 +10,81 @@ import { useRankTracker } from './hooks/useRankTracker';
 import { ShareOfVoiceChart, OpportunityMatrix } from './components/DashboardCharts';
 import { ContentFixerModal } from './components/ContentFixerModal';
 import { ResultPreviewModal } from './components/ResultPreviewModal';
-import { Keyword, Snapshot } from './types';
+import { Keyword, Snapshot, Project } from './types';
+import { getOrCreateProject, getKeywords, addKeyword, deleteKeyword, getLatestSnapshots } from './services/db';
 
-// Mock initial Keywords (User would normally add these)
-const INITIAL_KEYWORDS: Keyword[] = [
-  { id: '1', project_id: 'p1', term: 'best seo agency' },
-  { id: '2', project_id: 'p1', term: 'ai ranking tools' },
-  { id: '3', project_id: 'p1', term: 'how to rank in ai overview' },
-  { id: '4', project_id: 'p1', term: 'gemini vs chatgpt for seo' },
-  { id: '5', project_id: 'p1', term: 'hypefresh reviews' },
-  { id: '6', project_id: 'p1', term: 'digital marketing trends 2025' },
-  { id: '7', project_id: 'p1', term: 'is hypefresh legit' },
-  { id: '8', project_id: 'p1', term: 'rank tracking software' },
-];
+const DOMAIN = 'hypefresh.com'; // Project domain
 
-const DOMAIN = 'hypefresh.com'; // Mock project domain
+// Helper to bridge old UI code with new Schema
+// Adapts the new Snapshot to what the UI expects (properties like is_cited, etc.)
+// Or we update the UI to use the new properties.
+// Since there are many changes, I'll update the UI components where I can,
+// but also provide mapped properties for compatibility if needed.
 
-// Robust ID generator
-const generateId = () => Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
+// Mapping new 'sentiment_score' to old 'sentiment' string
+const getSentimentLabel = (score: number | null): 'Positive' | 'Neutral' | 'Negative' | 'Not Mentioned' => {
+  if (score === null) return 'Not Mentioned';
+  if (score >= 0.5) return 'Positive';
+  if (score <= -0.5) return 'Negative';
+  return 'Neutral';
+};
+
+// Mapping for UI display
+interface DisplaySnapshot extends Snapshot {
+  status: 'scanned' | 'pending' | 'failed';
+  keyword_term: string;
+  // Adapters for legacy components if they use these names
+  is_cited: boolean;
+  ai_overview_present: boolean;
+  ai_position: number | null;
+  gemini_rank: number | null;
+  ai_mode: 'Cited' | 'Not Cited' | 'Not Found';
+  sentiment: 'Positive' | 'Neutral' | 'Negative' | 'Not Mentioned';
+  screenshot_url?: string;
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'keywords'>('dashboard');
-  const [selectedSnapshot, setSelectedSnapshot] = useState<Snapshot | null>(null);
+  const [selectedSnapshot, setSelectedSnapshot] = useState<DisplaySnapshot | null>(null);
   
   // Modals
   const [isFixerOpen, setIsFixerOpen] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   
-  // State for Keywords with LocalStorage persistence
-  const [keywords, setKeywords] = useState<Keyword[]>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('tracked_keywords');
-      if (saved) {
-        return JSON.parse(saved);
-      }
-      // Initialize storage with defaults if empty so user has starting data
-      localStorage.setItem('tracked_keywords', JSON.stringify(INITIAL_KEYWORDS));
-    }
-    return INITIAL_KEYWORDS;
-  });
+  // DB State
+  const [project, setProject] = useState<Project | null>(null);
+  const [keywords, setKeywords] = useState<Keyword[]>([]);
+  const [historicalSnapshots, setHistoricalSnapshots] = useState<Snapshot[]>([]);
+  const [loading, setLoading] = useState(true);
+
   const [newKeywordTerm, setNewKeywordTerm] = useState('');
 
   // Custom Hook handling the Client-Side Queue
-  const { isScanning, progress, results, startScan, completed, total } = useRankTracker(DOMAIN);
+  const { isScanning, progress, results: scanResults, startScan, completed, total } = useRankTracker(DOMAIN);
 
-  // Trigger scan on mount for demo if results are empty
+  // Load Initial Data
   useEffect(() => {
-    if (results.length === 0 && !isScanning && keywords.length > 0) {
-      // In a real app, we check if scan is needed based on timestamps
-    }
+    const loadData = async () => {
+      setLoading(true);
+      try {
+        const proj = await getOrCreateProject(DOMAIN);
+        if (proj) {
+          setProject(proj);
+          const kws = await getKeywords(proj.id);
+          setKeywords(kws);
+
+          if (kws.length > 0) {
+              const snapshots = await getLatestSnapshots(kws.map(k => k.id));
+              setHistoricalSnapshots(snapshots);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to load data", e);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadData();
   }, []);
 
   const handleScan = () => {
@@ -68,23 +94,22 @@ export default function App() {
   const handleSingleScan = (keywordId: string) => {
     const keywordToScan = keywords.find(k => k.id === keywordId);
     if (keywordToScan) {
-      // Pass keepHistory: true so we don't wipe out other results
       startScan([keywordToScan], { keepHistory: true });
     }
   };
 
-  const handleOpenFixer = (snapshot: Snapshot) => {
+  const handleOpenFixer = (snapshot: DisplaySnapshot) => {
     setSelectedSnapshot(snapshot);
     setIsFixerOpen(true);
   };
 
-  const handleOpenPreview = (snapshot: Snapshot) => {
+  const handleOpenPreview = (snapshot: DisplaySnapshot) => {
     setSelectedSnapshot(snapshot);
     setIsPreviewOpen(true);
   };
 
-  const handleAddKeyword = () => {
-    if (!newKeywordTerm.trim()) return;
+  const handleAddKeyword = async () => {
+    if (!newKeywordTerm.trim() || !project) return;
     const term = newKeywordTerm.trim();
     
     // Prevent duplicates
@@ -93,48 +118,85 @@ export default function App() {
       return;
     }
 
-    const newKw: Keyword = {
-      id: generateId(),
-      project_id: 'p1',
-      term: term
-    };
+    const newKw = await addKeyword(project.id, term);
 
-    const updated = [newKw, ...keywords];
-    setKeywords(updated);
-    localStorage.setItem('tracked_keywords', JSON.stringify(updated));
-    setNewKeywordTerm('');
-  };
-
-  const handleDeleteKeyword = (id: string) => {
-    if (confirm('Are you sure you want to delete this keyword?')) {
-      const updated = keywords.filter(k => k.id !== id);
-      setKeywords(updated);
-      localStorage.setItem('tracked_keywords', JSON.stringify(updated));
+    if (newKw) {
+        setKeywords([newKw, ...keywords]);
+        setNewKeywordTerm('');
     }
   };
 
-  // Merge keywords with results to show all keywords even if not scanned yet
-  const displayedData = keywords.map(k => {
-    const res = results.find(r => r.keyword_id === k.id);
-    if (res) return res;
+  const handleDeleteKeyword = async (id: string) => {
+    if (confirm('Are you sure you want to delete this keyword?')) {
+      const success = await deleteKeyword(id);
+      if (success) {
+          setKeywords(keywords.filter(k => k.id !== id));
+      }
+    }
+  };
+
+  // Merge keywords with results and Adapt to DisplaySnapshot
+  const displayedData: DisplaySnapshot[] = keywords.map(k => {
+    // Priority: Scan Result -> Historical DB -> Pending
+    const rawRes = scanResults.find(r => r.keyword_id === k.id)
+                 || historicalSnapshots.find(r => r.keyword_id === k.id);
+
+    if (rawRes) {
+        const isCited = rawRes.ai_overview_cited;
+        const geminiCited = rawRes.gemini_cited;
+
+        return {
+            ...rawRes,
+            keyword_term: k.term,
+            status: 'scanned',
+
+            // Adapters
+            is_cited: isCited,
+            ai_overview_present: !!rawRes.ai_overview_snippet, // Infer presence from snippet or position
+            ai_position: rawRes.ai_overview_position,
+            gemini_rank: rawRes.gemini_position,
+            ai_mode: geminiCited ? 'Cited' : (rawRes.gemini_position === null ? 'Not Found' : 'Not Cited'), // Simplification
+            sentiment: getSentimentLabel(rawRes.sentiment_score),
+            screenshot_url: `https://placehold.co/600x400/EEE/31343C?text=Snapshot+for+${encodeURIComponent(k.term)}` // Placeholder if not in DB
+        };
+    }
     
     // Placeholder for unscanned keyword
     return {
       id: `temp-${k.id}`,
       keyword_id: k.id,
+      domain: DOMAIN,
       keyword_term: k.term,
+
       organic_rank: null,
-      gemini_rank: null,
+      organic_url: null,
+      organic_title: null,
+
+      ai_overview_cited: false,
+      ai_overview_position: null,
+      ai_overview_snippet: null,
+
+      gemini_cited: false,
+      gemini_position: null,
+      gemini_snippet: null,
+
+      sentiment_score: null,
+      content_gaps: null,
+      strategy_suggestions: null,
+
+      scan_duration_ms: 0,
+      created_at: new Date().toISOString(),
+
+      // Display/Pending fields
+      status: 'pending',
+      is_cited: false,
       ai_overview_present: false,
       ai_position: null,
-      is_cited: false,
-      sentiment: 'Not Mentioned',
-      raw_ai_text: '',
-      created_at: new Date().toISOString(),
-      status: 'pending',
+      gemini_rank: null,
       ai_mode: 'Not Found',
+      sentiment: 'Not Mentioned',
       screenshot_url: ''
-    } as Snapshot;
+    };
   });
 
   // Filter data for charts to avoid skewing with pending items
@@ -145,7 +207,7 @@ export default function App() {
     : 0;
 
   // Helper to determine status and icon
-  const getStatus = (snapshot: Snapshot) => {
+  const getStatus = (snapshot: DisplaySnapshot) => {
     if (snapshot.status === 'pending') return { label: 'Pending', color: 'bg-slate-100 text-slate-500', icon: HelpCircle };
     if (snapshot.sentiment === 'Negative') return { label: 'Critical', color: 'bg-red-50 text-red-700 border border-red-200', icon: ShieldAlert };
     if (snapshot.is_cited) return { label: 'Safe', color: 'bg-green-50 text-green-700 border border-green-200', icon: ShieldCheck };
@@ -282,7 +344,8 @@ export default function App() {
                 <div className="flex justify-between items-center mb-6">
                   <h3 className="font-semibold text-slate-800">AI Visibility Distribution</h3>
                 </div>
-                <ShareOfVoiceChart data={scannedData} />
+                {/* Cast to any if needed to bypass strict type check for now or ensure DisplaySnapshot is compatible */}
+                <ShareOfVoiceChart data={scannedData as any} />
               </div>
 
               {/* Opportunity Matrix */}
@@ -291,7 +354,7 @@ export default function App() {
                   <h3 className="font-semibold text-slate-800">Opportunity Matrix</h3>
                   <div className="text-xs text-slate-400">Low AI / High Organic</div>
                 </div>
-                <OpportunityMatrix data={scannedData} />
+                <OpportunityMatrix data={scannedData as any} />
               </div>
             </div>
           )}
@@ -485,13 +548,13 @@ export default function App() {
       <ContentFixerModal 
         isOpen={isFixerOpen} 
         onClose={() => setIsFixerOpen(false)} 
-        snapshot={selectedSnapshot}
+        snapshot={selectedSnapshot as any}
         domain={DOMAIN}
       />
       <ResultPreviewModal
         isOpen={isPreviewOpen}
         onClose={() => setIsPreviewOpen(false)}
-        snapshot={selectedSnapshot}
+        snapshot={selectedSnapshot as any}
       />
     </div>
   );
