@@ -1,99 +1,108 @@
+import { useState } from 'react';
+import { Keyword, Snapshot } from '../lib/supabase';
 
-import { useState, useCallback } from 'react';
-import { Keyword, Snapshot } from '../types';
-import { scanKeywordMock } from '../services/simulationService';
-
-interface TrackerState {
-  isScanning: boolean;
-  progress: number;
+interface ScanProgress {
   total: number;
   completed: number;
-  results: Snapshot[];
+  current: string;
 }
 
-export const useRankTracker = (domain: string) => {
-  const [state, setState] = useState<TrackerState>({
-    isScanning: false,
-    progress: 0,
-    total: 0,
-    completed: 0,
-    results: [],
-  });
+export function useRankTracker() {
+  const [scanning, setScanning] = useState(false);
+  const [progress, setProgress] = useState<ScanProgress>({ total: 0, completed: 0, current: '' });
+  const [results, setResults] = useState<Snapshot[]>([]);
+  const [errors, setErrors] = useState<string[]>([]);
 
-  const startScan = useCallback(async (keywords: Keyword[], options: { keepHistory?: boolean } = {}) => {
-    setState(prev => ({
-      isScanning: true,
-      total: keywords.length,
-      completed: 0,
-      progress: 0,
-      results: options.keepHistory ? prev.results : []
-    }));
+  async function scanKeywords(keywords: Keyword[], domain: string) {
+    setScanning(true);
+    setProgress({ total: keywords.length, completed: 0, current: '' });
+    setResults([]);
+    setErrors([]);
 
-    const concurrency = 3; // Process 3 keywords at a time
-    
-    // Chunk the array
-    for (let i = 0; i < keywords.length; i += concurrency) {
-      const chunk = keywords.slice(i, i + concurrency);
+    const newResults: Snapshot[] = [];
+    const newErrors: string[] = [];
+
+    // Process with concurrency limit of 2 (Vercel free tier friendly)
+    for (let i = 0; i < keywords.length; i += 2) {
+      const batch = keywords.slice(i, i + 2);
       
-      // Process chunk in parallel
-      const chunkPromises = chunk.map(async (kw) => {
+      const batchPromises = batch.map(async (keyword) => {
+        setProgress(prev => ({ ...prev, current: keyword.term }));
+
         try {
-          // In real app: const res = await fetch('/api/scan', { body: { keyword: kw.term ... }})
-          const data = await scanKeywordMock(kw, domain);
-          return data;
-        } catch (e) {
-          console.error(`Failed to scan ${kw.term}`, e);
-          // Return a failed snapshot placeholder
-          return {
-            id: Math.random().toString(36).substring(2, 9),
-            keyword_id: kw.id,
-            keyword_term: kw.term,
-            organic_rank: null,
-            gemini_rank: null,
-            ai_overview_present: false,
-            ai_position: null,
-            is_cited: false,
-            sentiment: 'Not Mentioned',
-            raw_ai_text: '',
-            created_at: new Date().toISOString(),
-            status: 'failed',
-            ai_mode: 'Not Found',
-            screenshot_url: ''
-          } as Snapshot;
+          const response = await fetch('/api/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              keyword: keyword.term,
+              domain,
+              location: keyword.location,
+              keywordId: keyword.id
+            })
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+
+          const data = await response.json();
+
+          if (data.success && data.snapshot) {
+            newResults.push(data.snapshot);
+
+            // Trigger async analysis if cited
+            if (data.snapshot.ai_overview_cited || data.snapshot.gemini_cited) {
+              analyzeSnapshot(data.snapshot);
+            }
+          }
+
+          setProgress(prev => ({ ...prev, completed: prev.completed + 1 }));
+        } catch (error: any) {
+          console.error(`Scan failed for "${keyword.term}":`, error);
+          newErrors.push(`${keyword.term}: ${error.message}`);
+          setProgress(prev => ({ ...prev, completed: prev.completed + 1 }));
         }
       });
 
-      const chunkResults = await Promise.all(chunkPromises);
+      await Promise.all(batchPromises);
 
-      // Update state incrementally
-      setState(prev => {
-        // Merge new results with previous results
-        // If an entry for this keyword already exists, replace it. Otherwise append.
-        const mergedResults = [...prev.results];
-        
-        chunkResults.forEach(newResult => {
-          const index = mergedResults.findIndex(r => r.keyword_id === newResult.keyword_id);
-          if (index !== -1) {
-            mergedResults[index] = newResult;
-          } else {
-            mergedResults.push(newResult);
-          }
-        });
-
-        return {
-          ...prev,
-          completed: prev.completed + chunk.length,
-          progress: Math.round(((prev.completed + chunk.length) / prev.total) * 100),
-          results: mergedResults
-        };
-      });
+      // Small delay between batches to avoid rate limiting
+      if (i + 2 < keywords.length) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
     }
 
-    setState(prev => ({ ...prev, isScanning: false, progress: 100 }));
-  }, [domain]);
+    setResults(newResults);
+    setErrors(newErrors);
+    setScanning(false);
+  }
+
+  async function analyzeSnapshot(snapshot: Snapshot) {
+    try {
+      const snippet = snapshot.ai_overview_snippet || snapshot.gemini_snippet;
+
+      if (!snippet) return;
+
+      await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          snapshotId: snapshot.id,
+          snippet,
+          keyword: snapshot.keyword_id,
+          domain: snapshot.domain
+        })
+      });
+    } catch (error) {
+      console.error('Analysis failed:', error);
+    }
+  }
 
   return {
-    ...state,
-    startScan
+    scanning,
+    progress,
+    results,
+    errors,
+    scanKeywords
   };
-};
+}

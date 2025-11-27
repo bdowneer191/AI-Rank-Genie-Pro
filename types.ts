@@ -1,42 +1,18 @@
 
-export interface Project {
-  id: string;
-  user_id: string;
-  domain: string;
-  target_location: string;
+import { Project, Keyword, Snapshot, ScanQueueItem } from './lib/supabase';
+
+// Re-export types from lib/supabase to maintain a central type definition file if needed,
+// or just redirect usages to lib/supabase.
+// For now, we'll sync them to avoid breaking imports in other files that use 'types.ts'.
+
+export type { Project, Keyword, Snapshot };
+
+// UI specific extension if needed (e.g., join results)
+export interface UIKeyword extends Keyword {
+    latestSnapshot?: Snapshot;
 }
 
-export interface Keyword {
-  id: string;
-  project_id: string;
-  term: string;
-  last_scan_date?: string;
-}
-
-// Result from SerpApi processing
-export interface Snapshot {
-  id: string;
-  keyword_id: string;
-  keyword_term: string; // Joined for UI convenience
-  organic_rank: number | null;
-  gemini_rank: number | null; // New: Rank in Gemini specific search
-  ai_overview_present: boolean;
-  ai_position: number | null; // 1 if first citation, etc.
-  is_cited: boolean;
-  sentiment: 'Positive' | 'Neutral' | 'Negative' | 'Not Mentioned';
-  raw_ai_text: string;
-  screenshot_url?: string; // New: Visual proof of the result
-  ai_mode_screenshot_url?: string; // New: Visual proof of the Gemini/AI Mode result
-  analysis?: { // New: AI Analysis of the content
-    gap: string;
-    strategy: string;
-    sources?: string[]; // Grounding sources
-  };
-  created_at: string;
-  status: 'scanned' | 'pending' | 'failed';
-  ai_mode: 'Cited' | 'Not Cited' | 'Not Found';
-}
-
+// Result from analysis (helper type)
 export interface AnalysisResult {
   sentiment: string;
   gap: string;
@@ -44,7 +20,7 @@ export interface AnalysisResult {
   sources?: string[];
 }
 
-// Queue item for client-side processing
+// Queue item for client-side processing (legacy/hybrid)
 export interface QueueItem {
   keyword: Keyword;
   status: 'queued' | 'processing' | 'completed' | 'failed';

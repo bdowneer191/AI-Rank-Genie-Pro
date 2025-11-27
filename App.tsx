@@ -7,84 +7,116 @@ import {
   ImageIcon, Play
 } from 'lucide-react';
 import { useRankTracker } from './hooks/useRankTracker';
+import { useProjects } from './hooks/useProjects';
 import { ShareOfVoiceChart, OpportunityMatrix } from './components/DashboardCharts';
 import { ContentFixerModal } from './components/ContentFixerModal';
 import { ResultPreviewModal } from './components/ResultPreviewModal';
-import { Keyword, Snapshot } from './types';
+import { Keyword, Snapshot, Project } from './lib/supabase';
+import { getLatestSnapshots } from './services/db';
 
-// Mock initial Keywords (User would normally add these)
-const INITIAL_KEYWORDS: Keyword[] = [
-  { id: '1', project_id: 'p1', term: 'best seo agency' },
-  { id: '2', project_id: 'p1', term: 'ai ranking tools' },
-  { id: '3', project_id: 'p1', term: 'how to rank in ai overview' },
-  { id: '4', project_id: 'p1', term: 'gemini vs chatgpt for seo' },
-  { id: '5', project_id: 'p1', term: 'hypefresh reviews' },
-  { id: '6', project_id: 'p1', term: 'digital marketing trends 2025' },
-  { id: '7', project_id: 'p1', term: 'is hypefresh legit' },
-  { id: '8', project_id: 'p1', term: 'rank tracking software' },
-];
+const DOMAIN = 'hypefresh.com'; // Project domain
 
-const DOMAIN = 'hypefresh.com'; // Mock project domain
+// Helper to bridge old UI code with new Schema
+// Adapts the new Snapshot to what the UI expects (properties like is_cited, etc.)
 
-// Robust ID generator
-const generateId = () => Math.random().toString(36).substring(2, 9) + Date.now().toString(36);
+// Mapping new 'sentiment_score' to old 'sentiment' string
+const getSentimentLabel = (score: number | null): 'Positive' | 'Neutral' | 'Negative' | 'Not Mentioned' => {
+  if (score === null) return 'Not Mentioned';
+  if (score >= 0.5) return 'Positive';
+  if (score <= -0.5) return 'Negative';
+  return 'Neutral';
+};
+
+// Mapping for UI display
+interface DisplaySnapshot extends Snapshot {
+  status: 'scanned' | 'pending' | 'failed';
+  keyword_term: string;
+  // Adapters for legacy components if they use these names
+  is_cited: boolean;
+  ai_overview_present: boolean;
+  ai_position: number | null;
+  gemini_rank: number | null;
+  ai_mode: 'Cited' | 'Not Cited' | 'Not Found';
+  sentiment: 'Positive' | 'Neutral' | 'Negative' | 'Not Mentioned';
+  screenshot_url?: string;
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'keywords'>('dashboard');
-  const [selectedSnapshot, setSelectedSnapshot] = useState<Snapshot | null>(null);
+  const [selectedSnapshot, setSelectedSnapshot] = useState<DisplaySnapshot | null>(null);
   
   // Modals
   const [isFixerOpen, setIsFixerOpen] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   
-  // State for Keywords with LocalStorage persistence
-  const [keywords, setKeywords] = useState<Keyword[]>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('tracked_keywords');
-      if (saved) {
-        return JSON.parse(saved);
-      }
-      // Initialize storage with defaults if empty so user has starting data
-      localStorage.setItem('tracked_keywords', JSON.stringify(INITIAL_KEYWORDS));
-    }
-    return INITIAL_KEYWORDS;
-  });
+  // State from Hooks
+  const { projects, keywords, loading: projectsLoading, fetchProjects, fetchKeywords, addProject, addKeyword, deleteKeyword } = useProjects();
+  const { scanning, progress, results: scanResults, scanKeywords } = useRankTracker();
+
+  const [project, setProject] = useState<Project | null>(null);
+  const [historicalSnapshots, setHistoricalSnapshots] = useState<Snapshot[]>([]);
   const [newKeywordTerm, setNewKeywordTerm] = useState('');
 
-  // Custom Hook handling the Client-Side Queue
-  const { isScanning, progress, results, startScan, completed, total } = useRankTracker(DOMAIN);
-
-  // Trigger scan on mount for demo if results are empty
+  // Initial Load & Project Selection
   useEffect(() => {
-    if (results.length === 0 && !isScanning && keywords.length > 0) {
-      // In a real app, we check if scan is needed based on timestamps
+    if (!projectsLoading) {
+      const existingProject = projects.find(p => p.domain === DOMAIN);
+      if (existingProject) {
+        setProject(existingProject);
+        fetchKeywords(existingProject.id);
+      } else if (projects.length === 0 && !projectsLoading) {
+          // If no projects exist, try to create the demo project
+          // Note: useProjects addProject uses a fixed ID which might conflict if the DB isn't empty but doesn't have this exact domain
+          // But for a fresh start/demo it should be okay.
+           addProject('HypeFresh Demo', DOMAIN).then((newProj) => {
+               if (newProj) {
+                   setProject(newProj);
+                   // No keywords to fetch for a new project
+               }
+           }).catch(e => console.error("Failed to auto-create project", e));
+      }
     }
-  }, []);
+  }, [projects, projectsLoading]); // Re-run when projects list updates
+
+  // Load Historical Snapshots when keywords change
+  useEffect(() => {
+      const loadHistory = async () => {
+          if (keywords.length > 0) {
+              const snapshots = await getLatestSnapshots(keywords.map(k => k.id));
+              setHistoricalSnapshots(snapshots);
+          } else {
+              setHistoricalSnapshots([]);
+          }
+      };
+      loadHistory();
+  }, [keywords]);
+
 
   const handleScan = () => {
-    startScan(keywords);
+     if (project && keywords.length > 0) {
+         scanKeywords(keywords, project.domain);
+     }
   };
 
   const handleSingleScan = (keywordId: string) => {
     const keywordToScan = keywords.find(k => k.id === keywordId);
-    if (keywordToScan) {
-      // Pass keepHistory: true so we don't wipe out other results
-      startScan([keywordToScan], { keepHistory: true });
+    if (keywordToScan && project) {
+      scanKeywords([keywordToScan], project.domain);
     }
   };
 
-  const handleOpenFixer = (snapshot: Snapshot) => {
+  const handleOpenFixer = (snapshot: DisplaySnapshot) => {
     setSelectedSnapshot(snapshot);
     setIsFixerOpen(true);
   };
 
-  const handleOpenPreview = (snapshot: Snapshot) => {
+  const handleOpenPreview = (snapshot: DisplaySnapshot) => {
     setSelectedSnapshot(snapshot);
     setIsPreviewOpen(true);
   };
 
-  const handleAddKeyword = () => {
-    if (!newKeywordTerm.trim()) return;
+  const handleAddKeyword = async () => {
+    if (!newKeywordTerm.trim() || !project) return;
     const term = newKeywordTerm.trim();
     
     // Prevent duplicates
@@ -93,48 +125,78 @@ export default function App() {
       return;
     }
 
-    const newKw: Keyword = {
-      id: generateId(),
-      project_id: 'p1',
-      term: term
-    };
-
-    const updated = [newKw, ...keywords];
-    setKeywords(updated);
-    localStorage.setItem('tracked_keywords', JSON.stringify(updated));
+    await addKeyword(project.id, term);
     setNewKeywordTerm('');
   };
 
-  const handleDeleteKeyword = (id: string) => {
+  const handleDeleteKeyword = async (id: string) => {
     if (confirm('Are you sure you want to delete this keyword?')) {
-      const updated = keywords.filter(k => k.id !== id);
-      setKeywords(updated);
-      localStorage.setItem('tracked_keywords', JSON.stringify(updated));
+      await deleteKeyword(id);
     }
   };
 
-  // Merge keywords with results to show all keywords even if not scanned yet
-  const displayedData = keywords.map(k => {
-    const res = results.find(r => r.keyword_id === k.id);
-    if (res) return res;
+  // Merge keywords with results and Adapt to DisplaySnapshot
+  const displayedData: DisplaySnapshot[] = keywords.map(k => {
+    // Priority: Scan Result -> Historical DB -> Pending
+    const rawRes = scanResults.find(r => r.keyword_id === k.id)
+                 || historicalSnapshots.find(r => r.keyword_id === k.id);
+
+    if (rawRes) {
+        const isCited = rawRes.ai_overview_cited;
+        const geminiCited = rawRes.gemini_cited;
+
+        return {
+            ...rawRes,
+            keyword_term: k.term,
+            status: 'scanned',
+
+            // Adapters
+            is_cited: isCited,
+            ai_overview_present: !!rawRes.ai_overview_snippet, // Infer presence from snippet or position
+            ai_position: rawRes.ai_overview_position,
+            gemini_rank: rawRes.gemini_position,
+            ai_mode: geminiCited ? 'Cited' : (rawRes.gemini_position === null ? 'Not Found' : 'Not Cited'), // Simplification
+            sentiment: getSentimentLabel(rawRes.sentiment_score),
+            screenshot_url: `https://placehold.co/600x400/EEE/31343C?text=Snapshot+for+${encodeURIComponent(k.term)}` // Placeholder
+        };
+    }
     
     // Placeholder for unscanned keyword
     return {
       id: `temp-${k.id}`,
       keyword_id: k.id,
+      domain: DOMAIN,
       keyword_term: k.term,
+
       organic_rank: null,
-      gemini_rank: null,
+      organic_url: null,
+      organic_title: null,
+
+      ai_overview_cited: false,
+      ai_overview_position: null,
+      ai_overview_snippet: null,
+
+      gemini_cited: false,
+      gemini_position: null,
+      gemini_snippet: null,
+
+      sentiment_score: null,
+      content_gaps: null,
+      strategy_suggestions: null,
+
+      scan_duration_ms: 0,
+      created_at: new Date().toISOString(),
+
+      // Display/Pending fields
+      status: 'pending',
+      is_cited: false,
       ai_overview_present: false,
       ai_position: null,
-      is_cited: false,
-      sentiment: 'Not Mentioned',
-      raw_ai_text: '',
-      created_at: new Date().toISOString(),
-      status: 'pending',
+      gemini_rank: null,
       ai_mode: 'Not Found',
+      sentiment: 'Not Mentioned',
       screenshot_url: ''
-    } as Snapshot;
+    };
   });
 
   // Filter data for charts to avoid skewing with pending items
@@ -145,13 +207,16 @@ export default function App() {
     : 0;
 
   // Helper to determine status and icon
-  const getStatus = (snapshot: Snapshot) => {
+  const getStatus = (snapshot: DisplaySnapshot) => {
     if (snapshot.status === 'pending') return { label: 'Pending', color: 'bg-slate-100 text-slate-500', icon: HelpCircle };
     if (snapshot.sentiment === 'Negative') return { label: 'Critical', color: 'bg-red-50 text-red-700 border border-red-200', icon: ShieldAlert };
     if (snapshot.is_cited) return { label: 'Safe', color: 'bg-green-50 text-green-700 border border-green-200', icon: ShieldCheck };
     if (snapshot.organic_rank && snapshot.organic_rank <= 10 && !snapshot.is_cited) return { label: 'Risk', color: 'bg-orange-50 text-orange-700 border border-orange-200', icon: AlertTriangle };
     return { label: 'Opportunity', color: 'bg-blue-50 text-blue-700 border border-blue-200', icon: Sparkles };
   };
+
+  // Calculate progress percentage for UI
+  const progressPercent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
 
   return (
     <div className="flex min-h-screen bg-slate-50 text-slate-900 font-sans">
@@ -206,15 +271,15 @@ export default function App() {
           
           <div className="flex items-center gap-4">
              {/* Progress Bar for Scan */}
-            {isScanning && (
+            {scanning && (
               <div className="flex flex-col items-end mr-4">
                  <span className="text-xs font-semibold text-indigo-600 mb-1 animate-pulse">
-                   Scanning {completed}/{total}
+                   Scanning {progress.completed}/{progress.total}
                  </span>
                  <div className="w-32 h-2 bg-slate-100 rounded-full overflow-hidden shadow-inner relative">
                    <div 
                      className="h-full bg-indigo-600 transition-all duration-300 ease-out relative overflow-hidden"
-                     style={{ width: `${progress}%` }}
+                     style={{ width: `${progressPercent}%` }}
                    >
                       <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/40 to-transparent w-full h-full animate-shimmer"></div>
                    </div>
@@ -224,11 +289,11 @@ export default function App() {
 
             <button 
               onClick={handleScan}
-              disabled={isScanning}
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold text-white shadow-sm transition ${isScanning ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+              disabled={scanning}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold text-white shadow-sm transition ${scanning ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
             >
-              <RefreshCw className={`w-4 h-4 ${isScanning ? 'animate-spin' : ''}`} />
-              {isScanning ? 'Updating...' : 'Update Rankings'}
+              <RefreshCw className={`w-4 h-4 ${scanning ? 'animate-spin' : ''}`} />
+              {scanning ? 'Updating...' : 'Update Rankings'}
             </button>
           </div>
         </header>
@@ -282,7 +347,8 @@ export default function App() {
                 <div className="flex justify-between items-center mb-6">
                   <h3 className="font-semibold text-slate-800">AI Visibility Distribution</h3>
                 </div>
-                <ShareOfVoiceChart data={scannedData} />
+                {/* Cast to any if needed to bypass strict type check for now or ensure DisplaySnapshot is compatible */}
+                <ShareOfVoiceChart data={scannedData as any} />
               </div>
 
               {/* Opportunity Matrix */}
@@ -291,7 +357,7 @@ export default function App() {
                   <h3 className="font-semibold text-slate-800">Opportunity Matrix</h3>
                   <div className="text-xs text-slate-400">Low AI / High Organic</div>
                 </div>
-                <OpportunityMatrix data={scannedData} />
+                <OpportunityMatrix data={scannedData as any} />
               </div>
             </div>
           )}
@@ -443,7 +509,7 @@ export default function App() {
                             {row.status === 'pending' ? (
                                <button 
                                  onClick={() => handleSingleScan(row.keyword_id)}
-                                 disabled={isScanning}
+                                 disabled={scanning}
                                  className="px-3 py-1.5 rounded-md bg-indigo-50 text-indigo-600 hover:bg-indigo-100 font-medium text-xs flex items-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                >
                                  Scan <Play className="w-3 h-3 fill-current" />
@@ -470,7 +536,7 @@ export default function App() {
                   ) : (
                     <tr>
                       <td colSpan={8} className="px-6 py-12 text-center text-slate-500">
-                        No keywords found. Add your first keyword above.
+                        {projectsLoading ? 'Loading projects...' : (project ? 'No keywords found. Add your first keyword above.' : 'No project found.')}
                       </td>
                     </tr>
                   )}
@@ -485,13 +551,13 @@ export default function App() {
       <ContentFixerModal 
         isOpen={isFixerOpen} 
         onClose={() => setIsFixerOpen(false)} 
-        snapshot={selectedSnapshot}
+        snapshot={selectedSnapshot as any}
         domain={DOMAIN}
       />
       <ResultPreviewModal
         isOpen={isPreviewOpen}
         onClose={() => setIsPreviewOpen(false)}
-        snapshot={selectedSnapshot}
+        snapshot={selectedSnapshot as any}
       />
     </div>
   );
