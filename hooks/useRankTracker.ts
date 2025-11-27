@@ -2,6 +2,7 @@
 import { useState, useCallback } from 'react';
 import { Keyword, Snapshot } from '../types';
 import { scanKeywordMock } from '../services/simulationService';
+import { saveSnapshot } from '../services/db';
 
 interface TrackerState {
   isScanning: boolean;
@@ -40,26 +41,45 @@ export const useRankTracker = (domain: string) => {
         try {
           // In real app: const res = await fetch('/api/scan', { body: { keyword: kw.term ... }})
           const data = await scanKeywordMock(kw, domain);
+
+          // Save valid scan to DB
+          try {
+            const saved = await saveSnapshot(data);
+            if (saved) return saved;
+          } catch (dbError) {
+             console.error(`Failed to save snapshot for ${kw.term}`, dbError);
+          }
+
           return data;
         } catch (e) {
           console.error(`Failed to scan ${kw.term}`, e);
-          // Return a failed snapshot placeholder
-          return {
+
+          const failedSnapshot: Snapshot = {
             id: Math.random().toString(36).substring(2, 9),
             keyword_id: kw.id,
-            keyword_term: kw.term,
+            domain: domain,
+
             organic_rank: null,
-            gemini_rank: null,
-            ai_overview_present: false,
-            ai_position: null,
-            is_cited: false,
-            sentiment: 'Not Mentioned',
-            raw_ai_text: '',
-            created_at: new Date().toISOString(),
-            status: 'failed',
-            ai_mode: 'Not Found',
-            screenshot_url: ''
-          } as Snapshot;
+            organic_url: null,
+            organic_title: null,
+
+            ai_overview_cited: false,
+            ai_overview_position: null,
+            ai_overview_snippet: null,
+
+            gemini_cited: false,
+            gemini_position: null,
+            gemini_snippet: null,
+
+            sentiment_score: null,
+            content_gaps: null,
+            strategy_suggestions: null,
+
+            scan_duration_ms: 0,
+            created_at: new Date().toISOString()
+          };
+
+           return failedSnapshot;
         }
       });
 
