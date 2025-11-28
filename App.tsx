@@ -14,11 +14,6 @@ import { ResultPreviewModal } from './components/ResultPreviewModal';
 import { Keyword, Snapshot, Project } from './lib/supabase';
 import { getLatestSnapshots } from './services/db';
 
-const DOMAIN = 'hypefresh.com'; // Project domain
-
-// Helper to bridge old UI code with new Schema
-// Adapts the new Snapshot to what the UI expects (properties like is_cited, etc.)
-
 // Mapping new 'sentiment_score' to old 'sentiment' string
 const getSentimentLabel = (score: number | null): 'Positive' | 'Neutral' | 'Negative' | 'Not Mentioned' => {
   if (score === null) return 'Not Mentioned';
