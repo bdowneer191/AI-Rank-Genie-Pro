@@ -7,19 +7,12 @@ import {
   ImageIcon, Play
 } from 'lucide-react';
 import { useRankTracker } from './hooks/useRankTracker';
+import { useProjects } from './hooks/useProjects';
 import { ShareOfVoiceChart, OpportunityMatrix } from './components/DashboardCharts';
 import { ContentFixerModal } from './components/ContentFixerModal';
 import { ResultPreviewModal } from './components/ResultPreviewModal';
-import { Keyword, Snapshot, Project } from './types';
-import { getOrCreateProject, getKeywords, addKeyword, deleteKeyword, getLatestSnapshots } from './services/db';
-
-const DOMAIN = 'hypefresh.com'; // Project domain
-
-// Helper to bridge old UI code with new Schema
-// Adapts the new Snapshot to what the UI expects (properties like is_cited, etc.)
-// Or we update the UI to use the new properties.
-// Since there are many changes, I'll update the UI components where I can,
-// but also provide mapped properties for compatibility if needed.
+import { Keyword, Snapshot, Project } from './lib/supabase';
+import { getLatestSnapshots } from './services/db';
 
 // Mapping new 'sentiment_score' to old 'sentiment' string
 const getSentimentLabel = (score: number | null): 'Positive' | 'Neutral' | 'Negative' | 'Not Mentioned' => {
@@ -51,50 +44,59 @@ export default function App() {
   const [isFixerOpen, setIsFixerOpen] = useState(false);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   
-  // DB State
-  const [project, setProject] = useState<Project | null>(null);
-  const [keywords, setKeywords] = useState<Keyword[]>([]);
-  const [historicalSnapshots, setHistoricalSnapshots] = useState<Snapshot[]>([]);
-  const [loading, setLoading] = useState(true);
+  // State from Hooks
+  const { projects, keywords, loading: projectsLoading, fetchProjects, fetchKeywords, addProject, addKeyword, deleteKeyword } = useProjects();
+  const { scanning, progress, results: scanResults, scanKeywords } = useRankTracker();
 
+  const [project, setProject] = useState<Project | null>(null);
+  const [historicalSnapshots, setHistoricalSnapshots] = useState<Snapshot[]>([]);
   const [newKeywordTerm, setNewKeywordTerm] = useState('');
 
-  // Custom Hook handling the Client-Side Queue
-  const { isScanning, progress, results: scanResults, startScan, completed, total } = useRankTracker(DOMAIN);
-
-  // Load Initial Data
+  // Initial Load & Project Selection
   useEffect(() => {
-    const loadData = async () => {
-      setLoading(true);
-      try {
-        const proj = await getOrCreateProject(DOMAIN);
-        if (proj) {
-          setProject(proj);
-          const kws = await getKeywords(proj.id);
-          setKeywords(kws);
-
-          if (kws.length > 0) {
-              const snapshots = await getLatestSnapshots(kws.map(k => k.id));
-              setHistoricalSnapshots(snapshots);
-          }
-        }
-      } catch (e) {
-        console.error("Failed to load data", e);
-      } finally {
-        setLoading(false);
+    if (!projectsLoading) {
+      const existingProject = projects.find(p => p.domain === DOMAIN);
+      if (existingProject) {
+        setProject(existingProject);
+        fetchKeywords(existingProject.id);
+      } else if (projects.length === 0 && !projectsLoading) {
+          // If no projects exist, try to create the demo project
+          // Note: useProjects addProject uses a fixed ID which might conflict if the DB isn't empty but doesn't have this exact domain
+          // But for a fresh start/demo it should be okay.
+           addProject('HypeFresh Demo', DOMAIN).then((newProj) => {
+               if (newProj) {
+                   setProject(newProj);
+                   // No keywords to fetch for a new project
+               }
+           }).catch(e => console.error("Failed to auto-create project", e));
       }
-    };
-    loadData();
-  }, []);
+    }
+  }, [projects, projectsLoading]); // Re-run when projects list updates
+
+  // Load Historical Snapshots when keywords change
+  useEffect(() => {
+      const loadHistory = async () => {
+          if (keywords.length > 0) {
+              const snapshots = await getLatestSnapshots(keywords.map(k => k.id));
+              setHistoricalSnapshots(snapshots);
+          } else {
+              setHistoricalSnapshots([]);
+          }
+      };
+      loadHistory();
+  }, [keywords]);
+
 
   const handleScan = () => {
-    startScan(keywords);
+     if (project && keywords.length > 0) {
+         scanKeywords(keywords, project.domain);
+     }
   };
 
   const handleSingleScan = (keywordId: string) => {
     const keywordToScan = keywords.find(k => k.id === keywordId);
-    if (keywordToScan) {
-      startScan([keywordToScan], { keepHistory: true });
+    if (keywordToScan && project) {
+      scanKeywords([keywordToScan], project.domain);
     }
   };
 
@@ -118,20 +120,13 @@ export default function App() {
       return;
     }
 
-    const newKw = await addKeyword(project.id, term);
-
-    if (newKw) {
-        setKeywords([newKw, ...keywords]);
-        setNewKeywordTerm('');
-    }
+    await addKeyword(project.id, term);
+    setNewKeywordTerm('');
   };
 
   const handleDeleteKeyword = async (id: string) => {
     if (confirm('Are you sure you want to delete this keyword?')) {
-      const success = await deleteKeyword(id);
-      if (success) {
-          setKeywords(keywords.filter(k => k.id !== id));
-      }
+      await deleteKeyword(id);
     }
   };
 
@@ -157,7 +152,7 @@ export default function App() {
             gemini_rank: rawRes.gemini_position,
             ai_mode: geminiCited ? 'Cited' : (rawRes.gemini_position === null ? 'Not Found' : 'Not Cited'), // Simplification
             sentiment: getSentimentLabel(rawRes.sentiment_score),
-            screenshot_url: `https://placehold.co/600x400/EEE/31343C?text=Snapshot+for+${encodeURIComponent(k.term)}` // Placeholder if not in DB
+            screenshot_url: `https://placehold.co/600x400/EEE/31343C?text=Snapshot+for+${encodeURIComponent(k.term)}` // Placeholder
         };
     }
     
@@ -215,6 +210,9 @@ export default function App() {
     return { label: 'Opportunity', color: 'bg-blue-50 text-blue-700 border border-blue-200', icon: Sparkles };
   };
 
+  // Calculate progress percentage for UI
+  const progressPercent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+
   return (
     <div className="flex min-h-screen bg-slate-50 text-slate-900 font-sans">
       {/* Sidebar */}
@@ -268,15 +266,15 @@ export default function App() {
           
           <div className="flex items-center gap-4">
              {/* Progress Bar for Scan */}
-            {isScanning && (
+            {scanning && (
               <div className="flex flex-col items-end mr-4">
                  <span className="text-xs font-semibold text-indigo-600 mb-1 animate-pulse">
-                   Scanning {completed}/{total}
+                   Scanning {progress.completed}/{progress.total}
                  </span>
                  <div className="w-32 h-2 bg-slate-100 rounded-full overflow-hidden shadow-inner relative">
                    <div 
                      className="h-full bg-indigo-600 transition-all duration-300 ease-out relative overflow-hidden"
-                     style={{ width: `${progress}%` }}
+                     style={{ width: `${progressPercent}%` }}
                    >
                       <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/40 to-transparent w-full h-full animate-shimmer"></div>
                    </div>
@@ -286,11 +284,11 @@ export default function App() {
 
             <button 
               onClick={handleScan}
-              disabled={isScanning}
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold text-white shadow-sm transition ${isScanning ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+              disabled={scanning}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold text-white shadow-sm transition ${scanning ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
             >
-              <RefreshCw className={`w-4 h-4 ${isScanning ? 'animate-spin' : ''}`} />
-              {isScanning ? 'Updating...' : 'Update Rankings'}
+              <RefreshCw className={`w-4 h-4 ${scanning ? 'animate-spin' : ''}`} />
+              {scanning ? 'Updating...' : 'Update Rankings'}
             </button>
           </div>
         </header>
@@ -506,7 +504,7 @@ export default function App() {
                             {row.status === 'pending' ? (
                                <button 
                                  onClick={() => handleSingleScan(row.keyword_id)}
-                                 disabled={isScanning}
+                                 disabled={scanning}
                                  className="px-3 py-1.5 rounded-md bg-indigo-50 text-indigo-600 hover:bg-indigo-100 font-medium text-xs flex items-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                >
                                  Scan <Play className="w-3 h-3 fill-current" />
@@ -533,7 +531,7 @@ export default function App() {
                   ) : (
                     <tr>
                       <td colSpan={8} className="px-6 py-12 text-center text-slate-500">
-                        No keywords found. Add your first keyword above.
+                        {projectsLoading ? 'Loading projects...' : (project ? 'No keywords found. Add your first keyword above.' : 'No project found.')}
                       </td>
                     </tr>
                   )}
