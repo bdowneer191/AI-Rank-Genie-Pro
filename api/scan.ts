@@ -1,5 +1,6 @@
 import { VercelRequest, VercelResponse } from '@vercel/node';
 import { createClient } from '@supabase/supabase-js';
+import { getCachedSnapshot } from '../lib/cache';
 
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -28,6 +29,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!keyword || !domain) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const cached = await getCachedSnapshot(keywordId, domain);
+    if (cached) {
+      return res.status(200).json({
+        success: true,
+        snapshot: cached,
+        cached: true,
+        duration: 0
+      });
     }
 
     // Parallel fetch to save time (critical for 10s limit)
